@@ -18,6 +18,8 @@ static PyMethodDef PyquMethods[] = {
    "Applies Z Pauli operator"},
   {"measure", pyqu_measure, METH_VARARGS,
    "Measures the whole register and collapses to outcome state"},
+  {"shor", pyqu_shor, METH_VARARGS,
+   "Measures the whole register and collapses to outcome state"},
   {NULL, NULL, 0, NULL}
 };
 
@@ -45,8 +47,53 @@ static PyMethodDef Qureg_methods[] = {
     {"prob", (PyCFunction)Qureg_prob, METH_NOARGS,
      "Returns the probabilities of the vectors of the computational basis"
     },
+    {"reverse", (PyCFunction)Qureg_reverse, METH_NOARGS,
+     "Reverses the weight of the bits of the register"
+    },
     {NULL}  /* Sentinel */
 };
+
+static PyNumberMethods QuregNumber_methods = {
+     (binaryfunc) 0,    // nb_add
+     (binaryfunc) 0, // nb_subtract;
+     (binaryfunc) 0, // nb_multiply;
+     (binaryfunc) 0, // nb_remainder;
+     (binaryfunc) 0, // nb_divmod;
+     (ternaryfunc) QuregNumber_Power, // nb_power;
+     (unaryfunc) 0, // nb_negative;
+     (unaryfunc) 0, // nb_positive;
+     (unaryfunc) 0, // nb_absolute;
+     (inquiry) 0, // nb_bool;
+     (unaryfunc) 0, // nb_invert;
+     (binaryfunc) 0, // nb_lshift;
+     (binaryfunc) 0, // nb_rshift;
+     (binaryfunc) 0, // nb_and;
+     (binaryfunc) 0, // nb_xor;
+     (binaryfunc) 0, // nb_or;
+     (unaryfunc) 0, // nb_int;
+     0, //void *nb_reserved;
+     (unaryfunc) 0, // nb_float;
+
+     (binaryfunc) 0, // nb_inplace_add;
+     (binaryfunc) 0, // nb_inplace_subtract;
+     (binaryfunc) 0, // nb_inplace_multiply;
+     (binaryfunc) 0, // nb_inplace_divide;
+     (binaryfunc) 0, // nb_inplace_remainder;
+     (ternaryfunc) 0, // nb_inplace_power;
+     (binaryfunc) 0, // nb_inplace_lshift;
+     (binaryfunc) 0, // nb_inplace_rshift;
+     (binaryfunc) 0, // nb_inplace_and;
+     (binaryfunc) 0, // nb_inplace_xor;
+     (binaryfunc) 0, // nb_inplace_or;
+
+     (binaryfunc) 0, // nb_floor_divide;
+     (binaryfunc) 0, // nb_true_divide;
+     (binaryfunc) 0, // nb_inplace_floor_divide;
+     (binaryfunc) 0, // nb_inplace_true_divide;
+
+     (unaryfunc)0 // nb_index;
+};
+
 
 static PyMappingMethods QuregMapping_methods = {
     (lenfunc) QuregMap_Length,
@@ -65,7 +112,7 @@ static PyTypeObject QuregType = {
     0,                         /* tp_setattr */
     0,                         /* tp_reserved */
     0,                         /* tp_repr */
-    0,                         /* tp_as_number */
+    &QuregNumber_methods,      /* tp_as_number */
     0,                         /* tp_as_sequence */
     &QuregMapping_methods,     /* tp_as_mapping */
     0,                         /* tp_hash  */
@@ -148,6 +195,7 @@ Qureg_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
         self->pyqr->refcount = 1;
         self->first = 0;
         self->last = width - 1;
+        self->reverse = 0;
     }
     return (PyObject *)self;
 }
@@ -162,7 +210,8 @@ static PyObject *
 Qureg_size(Qureg* self)
 {
     //TODO:I want this function to return the number of basis whose coefficient > 0
-    PyObject *ret = Py_BuildValue("i", 1 << (self->last - self->first + 1));
+    unsigned long long size = 1 << (self->last - self->first + 1);
+    PyObject *ret = Py_BuildValue("K", size);
     
     return ret;
 }
@@ -179,22 +228,27 @@ static PyObject *
 Qureg_coef(Qureg *self)
 {
     //TODO:I'm returning the coefficients of the whole register,
-    // I want to return just the coefficients of the basis of the subspace specified by qr[first,last]
-    int i,j = 0;
+    // I want to return just the coefficients of the basis of the subspace specified by qr[first,last] --> It makes no sense with entangled states!
+    int i,j,b = 0;
     PyObject *a;
-    int size =  1 << self->pyqr->qr.width;
+    unsigned long long int size =  1 << self->pyqr->qr.width;
     PyObject *coefList = PyList_New(size);
     
     for(i = 0; i < size; i++)
     {
-        if(self->pyqr->qr.node[j].state == i)
+        b = 0;
+        for(j = 0; j < self->pyqr->qr.size && !b; j++)
         {
-            float *p = (float *) &self->pyqr->qr.node[j].amplitude;
-            a = PyComplex_FromDoubles(p[0], p[1]);
-            j++;
-        } else {
-            a = PyComplex_FromDoubles(.0, .0);
+            if(self->pyqr->qr.node[j].state == i)
+            {
+                float *p = (float *) &self->pyqr->qr.node[j].amplitude;
+                a = PyComplex_FromDoubles(p[0], p[1]);
+                b = 1;
+            }
         }
+        if(!b)
+            a = PyComplex_FromDoubles(.0, .0);
+        
         PyList_SET_ITEM(coefList, i, a);
     }
     
@@ -204,27 +258,40 @@ Qureg_coef(Qureg *self)
 static PyObject *
 Qureg_prob(Qureg *self)
 {
-    //TODO:I'm returning the probabilities of the whole register,
-    // I want to return just the probabilities of the basis of the subspace specified by qr[first,last]
     int i,j = 0;
-    PyObject *a;
-    int size =  1 << self->pyqr->qr.width;
+    PyObject *a,*b;
+    //int size =  1 << self->pyqr->qr.width;
+    unsigned long long int size = 1 << (self->last - self->first + 1);
     PyObject *probList = PyList_New(size);
     
     for(i = 0; i < size; i++)
+        PyList_SET_ITEM(probList, i, PyFloat_FromDouble(.0));
+
+    for(j = 0; j < self->pyqr->qr.size; j++)
     {
-        if(self->pyqr->qr.node[j].state == i)
-        {
-            float *p = (float *) &self->pyqr->qr.node[j].amplitude;
-            a = PyFloat_FromDouble(p[0]*p[0]+p[1]*p[1]);
-            j++;
-        } else {
-            a = PyFloat_FromDouble(.0);
-        }
-        PyList_SET_ITEM(probList, i, a);
+        b = PyList_GET_ITEM(probList, (self->pyqr->qr.node[j].state >> self->first) & (size - 1));
+        float *p = (float *) &self->pyqr->qr.node[j].amplitude;
+        a = PyFloat_FromDouble(p[0]*p[0]+p[1]*p[1] + PyFloat_AS_DOUBLE(b));
+        PyList_SET_ITEM(probList, (self->pyqr->qr.node[j].state >> self->first) & (size - 1), a);
     }
     
     return probList;
+}
+
+static PyObject *
+Qureg_reverse(Qureg *self)
+{
+    self->reverse = !self->reverse;
+    
+    Py_RETURN_NONE;
+}
+
+static PyObject *QuregNumber_Power(PyObject *o1, PyObject *o2, PyObject *o3)
+{
+    //No es poden concatenar si son subregistres
+    //int size = o1->
+    printf("hola!");
+    Py_RETURN_NONE;
 }
 
 static Py_ssize_t QuregMap_Length(Qureg *reg)
@@ -356,13 +423,13 @@ static PyObject *pyqu_QFT(PyObject *self, PyObject *args)
 
 static PyObject *pyqu_UexpModN(PyObject *self, PyObject *args)
 {
-    int N,x,width,swidth;
-    Qureg *targetReg,*controlReg;
+    int N,x,i,inWidth,outWidth;
+    Qureg *inputReg,*outputReg;
     
-    if(!PyArg_ParseTuple(args, "O!O!iiii", &QuregType, &controlReg, &QuregType, &targetReg, &x, &N, &width, &swidth))
+    if(!PyArg_ParseTuple(args, "O!O!ii", &QuregType, &inputReg, &QuregType, &outputReg, &x, &N))
         return NULL;
         
-    if(controlReg->pyqr != targetReg->pyqr)
+    if(inputReg->pyqr != outputReg->pyqr)
     {
         //error: The control and the target registers must belong to the same quantum system
         return NULL;
@@ -376,8 +443,15 @@ static PyObject *pyqu_UexpModN(PyObject *self, PyObject *args)
         //register qr. This will change the condition of this 'if'
         return NULL;
     }*/
+    inWidth = inputReg->last - inputReg->first + 1;
+    outWidth = outputReg->last - outputReg->first + 1;
     
-    quantum_exp_mod_n(N, x, width, swidth, &targetReg->pyqr->qr);
+    quantum_addscratch(2*outWidth+2, &outputReg->pyqr->qr);
+    quantum_exp_mod_n(N, x, inWidth, outWidth, &outputReg->pyqr->qr);
+    for(i=0;i<2*outWidth+2;i++)
+    {
+      quantum_bmeasure(0, &outputReg->pyqr->qr);
+    }
     
     Py_RETURN_NONE;
 }
@@ -433,27 +507,22 @@ static PyObject *pyqu_measure(PyObject *self, PyObject *args)
     if(!PyArg_ParseTuple(args, "O!", &QuregType, &reg))
         return NULL;
     
-    for(i = reg->first; i <= reg->last; i++)
+    if(!reg->reverse)
     {
-        r = quantum_bmeasure_bitpreserve(i, &reg->pyqr->qr);
-        m = m | (r << (i - reg->first));
+        for(i = reg->first; i <= reg->last; i++)
+        {
+            r = quantum_bmeasure_bitpreserve(i, &reg->pyqr->qr);
+            m = m | (r << (i - reg->first));
+        }
+    } else {
+        for(i = reg->first; i <= reg->last; i++)
+        {
+            r = quantum_bmeasure_bitpreserve(i, &reg->pyqr->qr);
+            m = m | (r << (reg->last - i));
+        }
     }
     
     return Py_BuildValue("I", m);
-}
-/*
-static PyObject * pyqu_random(PyObject *self, PyObject *args)
-{
-  quantum_reg reg;
-  int result;
-
-  reg = quantum_new_qureg(0, 1);
-
-  quantum_hadamard(0, &reg);
-  
-  result = quantum_bmeasure(0, &reg);
-  
-  return Py_BuildValue("i", result);
 }
 
 static PyObject * pyqu_shor(PyObject *self, PyObject *args)
@@ -477,14 +546,14 @@ static PyObject * pyqu_shor(PyObject *self, PyObject *args)
   width=quantum_getwidth(N*N);
   swidth=quantum_getwidth(N);
 
-  //printf("N = %i, %i qubits required\n", N, width+3*swidth+2);
+  printf("N = %i, %i qubits required, x=%i, y=%i\n", N, width+3*swidth+2, width, swidth);
 
   while((quantum_gcd(N, x) > 1) || (x < 2))
     {
       x = rand() % N;
     } 
 
-  //printf("Random seed: %i\n", x);
+  printf("Random seed: %i\n", x);
 
   qr=quantum_new_qureg(0, width);
 
@@ -525,25 +594,25 @@ static PyObject * pyqu_shor(PyObject *self, PyObject *args)
 
   q = 1<<(width);
 
-  //printf("Measured %i (%f), ", c, (float)c/q);
+  printf("Measured %i (%f), ", c, (float)c/q);
 
   quantum_frac_approx(&c, &q, width);
 
-  //printf("fractional approximation is %i/%i.\n", c, q);
+  printf("fractional approximation is %i/%i.\n", c, q);
 
   if((q % 2 == 1) && (2*q<(1<<width)))
     {
-      //printf("Odd denominator, trying to expand by 2.\n");
+      printf("Odd denominator, trying to expand by 2.\n");
       q *= 2;
     }
     
   if(q % 2 == 1)
     {
-      //printf("Odd period, try again.\n");
+      printf("Odd period, try again.\n");
       return NULL;
     }
 
-  //printf("Possible period is %i.\n", q);
+  printf("Possible period is %i.\n", q);
   
   a = quantum_ipow(x, q/2) + 1 % N;
   b = quantum_ipow(x, q/2) - 1 % N;
@@ -576,7 +645,7 @@ static PyObject * pyqu_shor(PyObject *self, PyObject *args)
 
   return Py_BuildValue("s", result);
 }
-*/
+
 
 PyMODINIT_FUNC PyInit_pyqu(void)
 {
@@ -591,6 +660,7 @@ PyMODINIT_FUNC PyInit_pyqu(void)
         
     Py_INCREF(&QuregType);
     PyModule_AddObject(m, "Qureg", (PyObject *)&QuregType);
+    srand(time(0));
     
     return m; 
 }
